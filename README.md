@@ -68,13 +68,52 @@ ok, err = store.VerifyValue(&root, []byte("alice"), []byte("1000"), proof)
 ```
 
 The store talks to storage through the three-method `Backend`
-interface (point get, atomic write batch, ascending scan). Implement
-it over whatever the deployment persists to — an embedded KV store
-such as Pebble or bbolt on an encrypted volume is the expected shape.
-`MemBackend` ships for tests.
+interface (point get, atomic write batch, ascending scan).
+[`backend/pebble`](backend/pebble) ships a production adapter over
+[Pebble](https://github.com/cockroachdb/pebble) (pure Go); `MemBackend`
+ships for tests. The core `ledger` package itself depends only on the
+standard library.
 
 The store is single-writer and not safe for concurrent use; wrap it in
-a mutex at the application layer.
+a mutex at the application layer (the SQL layer below does this for
+you).
+
+## SQL
+
+[`sqlledger`](sqlledger) runs MySQL-dialect SQL over the ledger, using
+[go-mysql-server](https://github.com/dolthub/go-mysql-server)
+(Apache-2.0) as the query engine — embedded in-process only, by
+design: the application remains the sole boundary in front of its
+data, and there is deliberately no network listener.
+
+```go
+store, _ := sqlledger.Open(led, backend, "app")
+eng := sqlledger.NewEngine(store)
+ctx := eng.NewContext(context.Background())
+
+eng.Exec(ctx, `CREATE TABLE accounts (id BIGINT PRIMARY KEY, name VARCHAR(64), balance DOUBLE)`)
+eng.Exec(ctx, `INSERT INTO accounts VALUES (1, 'alice', 100.5)`)
+rows, _ := eng.Exec(ctx, `SELECT name, balance FROM accounts WHERE id = 1`)
+```
+
+Rows and the catalogue are ordinary ledger entries: the root attests
+the whole database, identical SQL histories produce identical roots,
+and `Store.VerifiedGet` returns any row together with its inclusion
+proof and the `(root, version)` it was read at (absence comes with an
+absence proof). Ordered scans and secondary indexes come from a
+derived keyspace next to the ledger — a materialisation, rebuilt
+automatically whenever it disagrees with the ledger's version; row
+content is always re-read and verified through the ledger.
+
+Supported today: CREATE/DROP/RENAME/TRUNCATE TABLE (a primary key is
+required), INSERT/UPDATE/DELETE, SELECT with joins, aggregation,
+ORDER BY and LIMIT, secondary and unique indexes (CREATE/DROP INDEX),
+AUTO_INCREMENT, and the type set INT/BIGINT (signed and unsigned),
+FLOAT/DOUBLE, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB,
+DATETIME/TIMESTAMP, BOOLEAN. Statements run in autocommit (each DML
+statement is one atomic ledger commit); multi-statement transactions,
+foreign keys, DECIMAL/JSON/ENUM columns, non-binary collations and
+column defaults are not yet supported.
 
 ## Freshness model and limits
 
