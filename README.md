@@ -130,6 +130,15 @@ authenticate content against the stored root record for that version;
 the version-to-root binding for history is backend-held, so history is
 strongest for roots the caller anchored.
 
+## Performance
+
+Measured figures and how to reproduce them:
+[docs/benchmarks.md](docs/benchmarks.md). In short: batched writes are
+CPU-bound on commitment hashing at roughly 5–7k rows/s per core,
+single-statement commits are fsync-bound, reads and proofs sit in the
+100–300 µs band through the whole stack, and scans pay ~150 µs per row
+for verified re-reads.
+
 ## Licence
 
 AGPL-3.0 — see [LICENSE](LICENSE).
