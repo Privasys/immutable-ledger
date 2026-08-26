@@ -19,9 +19,19 @@ var (
 func newTestStore(t *testing.T) (*Store, *MemBackend) {
 	t.Helper()
 	b := NewMemBackend()
-	s, err := Create(b, testCK, testSK)
+	s, err := Create(b, testCK) // default mode: plaintext values
 	if err != nil {
 		t.Fatalf("create: %v", err)
+	}
+	return s, b
+}
+
+func newEncryptedStore(t *testing.T, sk [KeySize]byte) (*Store, *MemBackend) {
+	t.Helper()
+	b := NewMemBackend()
+	s, err := Create(b, testCK, WithStorageKey(sk))
+	if err != nil {
+		t.Fatalf("create encrypted: %v", err)
 	}
 	return s, b
 }
@@ -156,22 +166,23 @@ func TestRootIsAPureFunctionOfContent(t *testing.T) {
 }
 
 func TestEncryptionIndependentRoot(t *testing.T) {
-	// Same ck, different storage keys: identical roots.
+	// Same ck across all three modes (plaintext, and two different
+	// storage keys): identical roots.
 	a, _ := newTestStore(t)
-	bBackend := NewMemBackend()
-	b, err := Create(bBackend, testCK, altSK)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b, _ := newEncryptedStore(t, testSK)
+	c, _ := newEncryptedStore(t, altSK)
 	ops := []Op{Put([]byte("k1"), []byte("v1")), Put([]byte("k2"), []byte("v2"))}
-	rootA, _, _ := a.PutBatch(ops)
-	rootB, _, err := b.PutBatch(ops)
-	if err != nil {
-		t.Fatal(err)
+	rootA, _, errA := a.PutBatch(ops)
+	rootB, _, errB := b.PutBatch(ops)
+	rootC, _, errC := c.PutBatch(ops)
+	if errA != nil || errB != nil || errC != nil {
+		t.Fatalf("puts failed: %v %v %v", errA, errB, errC)
 	}
-	if rootA != rootB {
-		t.Fatalf("roots differ across storage keys: %x vs %x", rootA, rootB)
+	if rootA != rootB || rootB != rootC {
+		t.Fatalf("roots differ across modes: %x / %x / %x", rootA, rootB, rootC)
 	}
+	// Encrypted mode reads back normally.
+	expectValue(t, b, "k1", "v1")
 }
 
 func TestRestartFromCheckpoint(t *testing.T) {
@@ -179,7 +190,7 @@ func TestRestartFromCheckpoint(t *testing.T) {
 	root, version := mustPut(t, s, Put([]byte("k"), []byte("v")))
 
 	// OpenLatest resumes from the atomic checkpoint.
-	s2, err := OpenLatest(b, testCK, testSK)
+	s2, err := OpenLatest(b, testCK)
 	if err != nil {
 		t.Fatalf("open latest: %v", err)
 	}
@@ -192,7 +203,7 @@ func TestRestartFromCheckpoint(t *testing.T) {
 	}
 
 	// Open at an explicit trusted checkpoint.
-	s3, err := Open(b, testCK, testSK, root, version)
+	s3, err := Open(b, testCK, root, version)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -201,16 +212,50 @@ func TestRestartFromCheckpoint(t *testing.T) {
 	}
 
 	// Open at a root the backend does not hold fails closed.
-	if _, err := Open(b, testCK, testSK, Hash{0xAB}, version); err == nil {
+	if _, err := Open(b, testCK, Hash{0xAB}, version); err == nil {
 		t.Fatal("open at a forged root succeeded")
 	}
 }
 
-func TestWrongStorageKeyFailsClosed(t *testing.T) {
+func TestCheckpointTamperFailsClosed(t *testing.T) {
+	// Plaintext mode: the checkpoint is HMAC-authenticated under a
+	// ck-derived key; a flipped bit must refuse to open.
 	s, b := newTestStore(t)
 	mustPut(t, s, Put([]byte("k"), []byte("v")))
-	if _, err := OpenLatest(b, testCK, altSK); err == nil {
+	if !b.Tamper(checkpointRecordKey()) {
+		t.Fatal("no checkpoint record to tamper")
+	}
+	if _, err := OpenLatest(b, testCK); err == nil {
+		t.Fatal("open from a tampered checkpoint succeeded")
+	}
+}
+
+func TestEncryptedModeRestartAndWrongKey(t *testing.T) {
+	s, b := newEncryptedStore(t, testSK)
+	root, version := mustPut(t, s, Put([]byte("k"), []byte("v")))
+
+	s2, err := OpenLatest(b, testCK, WithStorageKey(testSK))
+	if err != nil {
+		t.Fatalf("open latest (encrypted): %v", err)
+	}
+	r2, v2 := s2.Root()
+	if r2 != root || v2 != version {
+		t.Fatalf("restart state %x/%d, want %x/%d", r2, v2, root, version)
+	}
+	expectValue(t, s2, "k", "v")
+
+	// Wrong storage key fails closed.
+	if _, err := OpenLatest(b, testCK, WithStorageKey(altSK)); err == nil {
 		t.Fatal("open with the wrong storage key succeeded")
+	}
+	// Mode mismatch fails closed both ways.
+	if _, err := OpenLatest(b, testCK); err == nil {
+		t.Fatal("plaintext-mode open of an encrypted store succeeded")
+	}
+	ps, pb := newTestStore(t)
+	mustPut(t, ps, Put([]byte("k"), []byte("v")))
+	if _, err := OpenLatest(pb, testCK, WithStorageKey(testSK)); err == nil {
+		t.Fatal("encrypted-mode open of a plaintext store succeeded")
 	}
 }
 
@@ -387,9 +432,10 @@ func TestSnapshotExportRestore(t *testing.T) {
 		t.Fatalf("exported %d leaves, want 40", len(all))
 	}
 
-	// Restore into a store with a DIFFERENT storage key: same root.
+	// Restore into a store in a DIFFERENT at-rest mode (encrypted vs
+	// the source's plaintext): same root.
 	rb := NewMemBackend()
-	restored, err := Create(rb, testCK, altSK)
+	restored, err := Create(rb, testCK, WithStorageKey(altSK))
 	if err != nil {
 		t.Fatal(err)
 	}

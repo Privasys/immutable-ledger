@@ -7,10 +7,12 @@
 //
 // One 32-byte root attests the entire logical data state. The root is
 // encryption-independent: it commits to keyed plaintext hashes
-// (HMAC-SHA-256 under a commitment key ck), while value bytes at rest
-// are AES-256-GCM ciphertext under a separate per-machine storage key.
-// Replicas sharing ck compare state as (version, root) regardless of
-// their storage keys.
+// (HMAC-SHA-256 under a commitment key ck), never to the bytes at
+// rest. At-rest confidentiality is the volume's job by default (a LUKS
+// data partition inside a confidential VM, typically); an optional
+// per-machine storage key (WithStorageKey) adds AES-256-GCM value
+// encryption as a second layer. Replicas sharing ck compare state as
+// (version, root) whatever each one does at rest.
 //
 // This package is the Go port of the enclave-os-mini `enclave-os-merkle`
 // crate. The commitment scheme, node hashing, record encodings and

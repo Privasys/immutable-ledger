@@ -21,19 +21,25 @@ import (
 //     sharing ck but holding different storage keys produce identical
 //     roots and compare state as (version, root).
 //
-// Value bytes at rest are AES-256-GCM ciphertext under the per-machine
-// storage key; nodes are plaintext (hashes only).
+// Value bytes at rest are plaintext by default (the volume's encryption
+// is the confidentiality layer — a LUKS data partition inside a TD,
+// typically) or AES-256-GCM ciphertext when a per-machine storage key
+// is configured (WithStorageKey). Nodes are plaintext (hashes only) in
+// both modes, and integrity never depends on this layer: every read
+// re-derives the keyed commitment.
 //
 // # Records (single backend keyspace, 1-byte prefix)
 //
 //	prefix | key                              | value
 //	 'n'   | nodeKey                          | node encoding
-//	 'v'   | vh ‖ value_version u64 BE        | GCM ciphertext
+//	 'v'   | vh ‖ value_version u64 BE        | value bytes (or GCM ciphertext)
 //	 's'   | stale_since u64 BE ‖ target key  | empty
 //	 'r'   | version u64 BE                   | root hash
-//	 'c'   | (fixed)                          | GCM-encrypted (root, version)
-//	                                            checkpoint, written atomically
-//	                                            inside every commit batch
+//	 'c'   | (fixed)                          | authenticated (root, version)
+//	                                            checkpoint (HMAC under a
+//	                                            ck-derived key, or GCM under
+//	                                            the storage key), written
+//	                                            atomically inside every commit
 //
 // Node and value records are both versioned and immutable: a record is
 // written by exactly one commit and never again (re-inserting a value
@@ -63,6 +69,7 @@ var (
 	hmacTagValue  = []byte("v")
 	valueAADTag   = []byte("enclave_os_merkle_val")
 	checkpointAAD = []byte("enclave_os_merkle_ckpt")
+	ckptMACLabel  = []byte("immutable-ledger:ckpt-mac:v1")
 )
 
 func nodeRecordKey(nk *nodeKey) []byte {
@@ -133,7 +140,17 @@ const pruneChunk = 512
 type Store struct {
 	backend Backend
 	ck      []byte
-	cipher  *aeadCipher
+	// cipher encrypts value records and the checkpoint when a storage
+	// key was supplied (WithStorageKey). nil = plaintext values: the
+	// deployment relies on volume encryption (TD attestation + LUKS)
+	// for confidentiality at rest, and the checkpoint is authenticated
+	// with ckptMAC instead. Integrity is identical in both modes —
+	// every read still verifies the value commitment against the root.
+	cipher *aeadCipher
+	// ckptMAC keys the checkpoint HMAC in plaintext mode (derived from
+	// ck; the root is not secret — root records store it plaintext —
+	// only checkpoint authenticity matters).
+	ckptMAC []byte
 	root    Hash
 	version uint64
 	// rootChild is the current root's child reference (nil = empty tree).
@@ -141,6 +158,26 @@ type Store struct {
 	cache     *nodeCache
 	// snapshotPin caps pruning while a snapshot streams from a version.
 	snapshotPin *uint64
+}
+
+// Option configures a store at construction.
+type Option func(*storeOptions)
+
+type storeOptions struct {
+	sk *[KeySize]byte
+}
+
+// WithStorageKey enables at-rest encryption of value records and the
+// checkpoint under a per-machine storage key (AES-256-GCM), as a
+// second layer on top of whatever encrypts the volume. Without it,
+// value bytes are stored plaintext in the backend and confidentiality
+// at rest is the volume's job. The root is a pure function of the
+// logical data and the commitment key in BOTH modes, so replicas and
+// proofs are unaffected by this choice — but the two modes write
+// different value-record bytes, so one store's backend must always be
+// opened in the mode that wrote it.
+func WithStorageKey(sk [KeySize]byte) Option {
+	return func(o *storeOptions) { o.sk = &sk }
 }
 
 // update is one deduplicated change: vh non-nil = insert/overwrite,
@@ -164,21 +201,22 @@ type commitAcc struct {
 	pending map[string]pendingNode
 	// stale holds the record keys superseded this commit.
 	stale [][]byte
-	// insertCTs holds ciphertexts for this batch's inserts, by path;
-	// consumed when the insert actually lands as a new leaf.
+	// insertCTs holds the stored-form value bytes for this batch's
+	// inserts, by path; consumed when the insert actually lands as a
+	// new leaf.
 	insertCTs map[Hash][]byte
 	// values holds the value records to write this commit: vh →
-	// ciphertext (all at newVersion).
+	// stored form (all at newVersion).
 	values map[Hash][]byte
 }
 
 // Create builds a fresh, empty store (version 0, placeholder root).
-func Create(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Store, error) {
-	s, err := newStore(backend, commitmentKey, storageKey)
+func Create(backend Backend, commitmentKey [KeySize]byte, opts ...Option) (*Store, error) {
+	s, err := newStore(backend, commitmentKey, opts)
 	if err != nil {
 		return nil, err
 	}
-	ckpt, err := s.encryptCheckpoint(&placeholderHash, 0)
+	ckpt, err := s.sealCheckpoint(&placeholderHash, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -194,8 +232,8 @@ func Create(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Store, e
 // Open opens an existing store at a trusted (root, version) checkpoint
 // (e.g. one anchored externally). It verifies the backend actually
 // holds that root before returning; fails closed otherwise.
-func Open(backend Backend, commitmentKey, storageKey [KeySize]byte, root Hash, version uint64) (*Store, error) {
-	s, err := newStore(backend, commitmentKey, storageKey)
+func Open(backend Backend, commitmentKey [KeySize]byte, root Hash, version uint64, opts ...Option) (*Store, error) {
+	s, err := newStore(backend, commitmentKey, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -207,14 +245,15 @@ func Open(backend Backend, commitmentKey, storageKey [KeySize]byte, root Hash, v
 	return s, nil
 }
 
-// OpenLatest opens at the checkpoint record the store itself maintains
-// (written atomically inside every commit batch, AES-256-GCM under the
-// storage key). Storage cannot forge it — at worst it can replay an old
-// checkpoint together with a matching old store, the documented
-// restart-replay residual. Prefer anchoring Root() externally when an
-// extra anchor is available.
-func OpenLatest(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Store, error) {
-	cipher, err := newAEAD(storageKey)
+// OpenLatest opens at the checkpoint record the store itself maintains,
+// written atomically inside every commit batch and authenticated:
+// AES-256-GCM under the storage key when one is configured, otherwise
+// an HMAC under a key derived from the commitment key. Storage cannot
+// forge it — at worst it can replay an old checkpoint together with a
+// matching old store, the documented restart-replay residual. Prefer
+// anchoring Root() externally when an extra anchor is available.
+func OpenLatest(backend Backend, commitmentKey [KeySize]byte, opts ...Option) (*Store, error) {
+	s, err := newStore(backend, commitmentKey, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -225,52 +264,114 @@ func OpenLatest(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Stor
 	if !ok {
 		return nil, errMissing("checkpoint record")
 	}
-	root, version, err := decryptCheckpoint(cipher, record)
+	root, version, err := s.openCheckpoint(record)
 	if err != nil {
 		return nil, err
 	}
-	return Open(backend, commitmentKey, storageKey, root, version)
+	s.root, s.version = root, version
+	s.rootChild, err = s.loadRootChild(root, version)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // OpenOrCreate opens an existing store, or creates a fresh one if no
 // checkpoint exists yet.
-func OpenOrCreate(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Store, error) {
+func OpenOrCreate(backend Backend, commitmentKey [KeySize]byte, opts ...Option) (*Store, error) {
 	_, ok, err := backend.Get(checkpointRecordKey())
 	if err != nil {
 		return nil, errBackend(err)
 	}
 	if ok {
-		return OpenLatest(backend, commitmentKey, storageKey)
+		return OpenLatest(backend, commitmentKey, opts...)
 	}
-	return Create(backend, commitmentKey, storageKey)
+	return Create(backend, commitmentKey, opts...)
 }
 
-func newStore(backend Backend, commitmentKey, storageKey [KeySize]byte) (*Store, error) {
-	cipher, err := newAEAD(storageKey)
-	if err != nil {
-		return nil, err
+func newStore(backend Backend, commitmentKey [KeySize]byte, opts []Option) (*Store, error) {
+	var o storeOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
-	return &Store{
+	s := &Store{
 		backend: backend,
 		ck:      append([]byte(nil), commitmentKey[:]...),
-		cipher:  cipher,
 		root:    placeholderHash,
 		version: 0,
 		cache:   newNodeCache(defaultCacheCapacity),
-	}, nil
+	}
+	if o.sk != nil {
+		cipher, err := newAEAD(*o.sk)
+		if err != nil {
+			return nil, err
+		}
+		s.cipher = cipher
+	} else {
+		mac := hmac.New(sha256.New, s.ck)
+		mac.Write(ckptMACLabel)
+		s.ckptMAC = mac.Sum(nil)
+	}
+	return s, nil
 }
 
-func (s *Store) encryptCheckpoint(root *Hash, version uint64) ([]byte, error) {
+// -- value records (mode-dependent at-rest form) --------------------------
+
+// sealValue produces the stored form of a value: ciphertext under the
+// storage key when configured, the plaintext bytes otherwise. Either
+// way the read path re-derives the keyed commitment, so integrity does
+// not depend on this layer.
+func (s *Store) sealValue(path *Hash, plaintext []byte) ([]byte, error) {
+	if s.cipher != nil {
+		return s.cipher.encrypt(plaintext, valueAAD(path))
+	}
+	return append([]byte(nil), plaintext...), nil
+}
+
+// openValue recovers the plaintext from a stored value record.
+func (s *Store) openValue(path *Hash, record []byte) ([]byte, error) {
+	if s.cipher != nil {
+		pt, err := s.cipher.decrypt(record, valueAAD(path))
+		if err != nil {
+			return nil, errCorruptedf("value decrypt: %v", err)
+		}
+		return pt, nil
+	}
+	return record, nil
+}
+
+// -- checkpoint (mode-dependent authentication) ---------------------------
+
+func (s *Store) sealCheckpoint(root *Hash, version uint64) ([]byte, error) {
 	payload := make([]byte, 0, HashSize+8)
 	payload = append(payload, root[:]...)
 	payload = binary.BigEndian.AppendUint64(payload, version)
-	return s.cipher.encrypt(payload, checkpointAAD)
+	if s.cipher != nil {
+		return s.cipher.encrypt(payload, checkpointAAD)
+	}
+	mac := hmac.New(sha256.New, s.ckptMAC)
+	mac.Write(payload)
+	return mac.Sum(payload), nil
 }
 
-func decryptCheckpoint(cipher *aeadCipher, record []byte) (Hash, uint64, error) {
-	payload, err := cipher.decrypt(record, checkpointAAD)
-	if err != nil {
-		return Hash{}, 0, errCorruptedf("checkpoint decrypt: %v", err)
+func (s *Store) openCheckpoint(record []byte) (Hash, uint64, error) {
+	var payload []byte
+	if s.cipher != nil {
+		pt, err := s.cipher.decrypt(record, checkpointAAD)
+		if err != nil {
+			return Hash{}, 0, errCorruptedf("checkpoint decrypt: %v", err)
+		}
+		payload = pt
+	} else {
+		if len(record) != HashSize+8+sha256.Size {
+			return Hash{}, 0, errCorrupted("checkpoint bad length")
+		}
+		payload = record[:HashSize+8]
+		mac := hmac.New(sha256.New, s.ckptMAC)
+		mac.Write(payload)
+		if !hmac.Equal(mac.Sum(nil), record[HashSize+8:]) {
+			return Hash{}, 0, errCorrupted("checkpoint authentication failed")
+		}
 	}
 	if len(payload) != HashSize+8 {
 		return Hash{}, 0, errCorrupted("checkpoint bad length")
@@ -371,7 +472,7 @@ func (s *Store) computeBatch(ops []Op) (*commitAcc, *child, Hash, error) {
 			continue
 		}
 		vh := s.vhOf(&path, *value)
-		ct, err := s.cipher.encrypt(*value, valueAAD(&path))
+		ct, err := s.sealValue(&path, *value)
 		if err != nil {
 			return nil, nil, Hash{}, err
 		}
@@ -449,7 +550,7 @@ func (s *Store) commitAcc(acc *commitAcc, newRootChild *child, newRoot Hash) (Ha
 		batch = append(batch, BatchOp{Key: staleRecordKey(newVersion, target)})
 	}
 	batch = append(batch, BatchOp{Key: rootRecordKey(newVersion), Value: newRoot[:]})
-	ckpt, err := s.encryptCheckpoint(&newRoot, newVersion)
+	ckpt, err := s.sealCheckpoint(&newRoot, newVersion)
 	if err != nil {
 		return Hash{}, 0, err
 	}
@@ -662,9 +763,9 @@ func (s *Store) readValue(path, vh *Hash, valueVersion uint64) ([]byte, error) {
 	if !ok {
 		return nil, errMissing("value record")
 	}
-	pt, err := s.cipher.decrypt(ct, valueAAD(path))
+	pt, err := s.openValue(path, ct)
 	if err != nil {
-		return nil, errCorruptedf("value decrypt: %v", err)
+		return nil, err
 	}
 	if s.vhOf(path, pt) != *vh {
 		return nil, errCorrupted("value commitment mismatch")

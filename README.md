@@ -22,10 +22,15 @@ logical data, and proofs verify across implementations (enforced by
   Stale data, dropped keys and resurrected deletes are errors, never
   wrong answers.
 - **Encryption-independent root.** The root commits to keyed plaintext
-  hashes (`HMAC-SHA-256` under a commitment key `ck`); value bytes at
-  rest are ciphertext under a separate per-machine storage key. Two
-  stores sharing `ck` compare entire datasets as one `(version, root)`
-  pair, whatever their disks look like.
+  hashes (`HMAC-SHA-256` under a commitment key `ck`), never to the
+  bytes at rest. Two stores sharing `ck` compare entire datasets as one
+  `(version, root)` pair, whatever each one does at rest.
+- **One key by default.** Confidentiality at rest is the volume's job —
+  in a confidential VM the backend sits on an attested, LUKS-encrypted
+  data partition, and adding a second application-level key on top buys
+  little. Deployments that do want defence in depth pass
+  `WithStorageKey(sk)` to add AES-256-GCM value encryption under a
+  per-machine key; the roots and proofs are identical in both modes.
 - **Atomic commits.** A batch of puts and deletes lands as one atomic
   backend write (new nodes, values, stale marks, root record and an
   encrypted checkpoint); the in-memory root only advances after the
@@ -45,10 +50,10 @@ logical data, and proofs verify across implementations (enforced by
 ```go
 import ledger "github.com/Privasys/immutable-ledger"
 
-// ck: the dataset's commitment key (shared by replicas of the same
-// logical dataset). sk: this machine's storage key. In a confidential
-// deployment both come from an attested key release, never from disk.
-store, err := ledger.OpenOrCreate(backend, ck, sk)
+// ck: the dataset's commitment key, shared by replicas of the same
+// logical dataset. In a confidential deployment it comes from an
+// attested key release (an Enclave Vaults credential), never from disk.
+store, err := ledger.OpenOrCreate(backend, ck)
 
 root, version, err := store.PutBatch([]ledger.Op{
     ledger.Put([]byte("alice"), []byte("1000")),
@@ -75,8 +80,9 @@ a mutex at the application layer.
 
 Live reads are bound to the in-memory root: storage cannot roll back or
 forge state while the process runs. On restart, `OpenLatest` resumes
-from an encrypted checkpoint written atomically with every commit and
-refuses storage that does not verify against it. A backend that replays
+from an authenticated checkpoint written atomically with every commit
+(HMAC under a `ck`-derived key, or AES-256-GCM when a storage key is
+configured) and refuses storage that does not verify against it. A backend that replays
 an old checkpoint *together with* a matching old store is not locally
 detectable — anchor `Root()` externally (a monitoring system, a
 transparency log, a vault) to narrow that residual, or replicate and

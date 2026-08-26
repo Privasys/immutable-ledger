@@ -30,13 +30,12 @@ const (
 	goldenProofAbsent = "015e173bbc21ccdbb6739f7a668a1d3665311d13dccfb5e134d85813cf48a7dc96c47de7bfaa61820af849138ca1a40ff2c0a3d2535b9d953327a134ad7de7eeaf0600461d1cd5a9089e9cfbbb09e0a74771f617c1b7e5ab57c7af9d4c3a3d8d7571daa2c85481cbe22a2f0175bde912ec11eb6661aebb789d0549365be6edb0354742d1383e24a1d0e57af72344d84da7b1316925176994fa801f02d1fe333955f8f8dc0e6813984af5296376cfddf10dc6b9b4f8fe68930344edfd9272333803b0fad306b987452eb153f310ec5374890306980f09ba6478892634e89c2b7acbada032e0fce68940cce2fbd9d641c9369a2843113b0e7b26b1dc63327fc3b06607fd"
 )
 
-func goldenKeys() ([KeySize]byte, [KeySize]byte) {
-	var ck, sk [KeySize]byte
+func goldenKeys() [KeySize]byte {
+	var ck [KeySize]byte
 	for i := 0; i < KeySize; i++ {
 		ck[i] = byte(i)
-		sk[i] = byte(0xA0 + i)
 	}
-	return ck, sk
+	return ck
 }
 
 func mustHexRoot(t *testing.T, s string) Hash {
@@ -51,8 +50,8 @@ func mustHexRoot(t *testing.T, s string) Hash {
 }
 
 func TestRustCompatibilityRoots(t *testing.T) {
-	ck, sk := goldenKeys()
-	s, err := Create(NewMemBackend(), ck, sk)
+	ck := goldenKeys()
+	s, err := Create(NewMemBackend(), ck)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +130,8 @@ func TestRustCompatibilityRoots(t *testing.T) {
 func TestRustCompatibilityProofs(t *testing.T) {
 	// Rust-generated proofs verify against the Rust-generated root,
 	// through the Go verifier, including the value commitment check.
-	ck, sk := goldenKeys()
-	s, err := Create(NewMemBackend(), ck, sk)
+	ck := goldenKeys()
+	s, err := Create(NewMemBackend(), ck)
 	if err != nil {
 		t.Fatal(err)
 	}

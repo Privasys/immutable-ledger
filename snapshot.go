@@ -131,7 +131,7 @@ func (s *Store) RestoreLeaves(leaves []Leaf) (Hash, uint64, error) {
 	updates := make([]update, 0, len(deduped))
 	for path, pt := range deduped {
 		vh := s.vhOf(&path, pt)
-		ct, err := s.cipher.encrypt(pt, valueAAD(&path))
+		ct, err := s.sealValue(&path, pt)
 		if err != nil {
 			return Hash{}, 0, err
 		}
@@ -165,7 +165,7 @@ func (s *Store) StampVersion(version uint64) error {
 	if version < s.version {
 		return errInvalidf("cannot stamp version %d below current %d", version, s.version)
 	}
-	ckpt, err := s.encryptCheckpoint(&s.root, version)
+	ckpt, err := s.sealCheckpoint(&s.root, version)
 	if err != nil {
 		return err
 	}
