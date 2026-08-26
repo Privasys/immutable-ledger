@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	ledger "github.com/Privasys/immutable-ledger"
+	ledger "github.com/Privasys/immutable-ledger/ledger"
 )
 
 func openTest(t *testing.T) *Backend {

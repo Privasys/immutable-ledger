@@ -43,7 +43,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql"
 
-	ledger "github.com/Privasys/immutable-ledger"
+	ledger "github.com/Privasys/immutable-ledger/ledger"
 )
 
 // Ledger value tags (first byte of every SQL-written ledger value).

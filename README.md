@@ -48,7 +48,7 @@ logical data, and proofs verify across implementations (enforced by
 ## Usage
 
 ```go
-import ledger "github.com/Privasys/immutable-ledger"
+import ledger "github.com/Privasys/immutable-ledger/ledger"
 
 // ck: the dataset's commitment key, shared by replicas of the same
 // logical dataset. In a confidential deployment it comes from an

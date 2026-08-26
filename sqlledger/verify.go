@@ -9,7 +9,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql"
 
-	ledger "github.com/Privasys/immutable-ledger"
+	ledger "github.com/Privasys/immutable-ledger/ledger"
 )
 
 // Verified reads: because every row is one ledger entry, a row can be

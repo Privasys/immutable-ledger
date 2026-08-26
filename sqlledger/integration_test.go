@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"testing"
 
-	ledger "github.com/Privasys/immutable-ledger"
 	pebbleback "github.com/Privasys/immutable-ledger/backend/pebble"
+	ledger "github.com/Privasys/immutable-ledger/ledger"
 )
 
 // The full stack on disk: SQL over the ledger over Pebble, across a

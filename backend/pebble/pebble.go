@@ -15,7 +15,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 
-	ledger "github.com/Privasys/immutable-ledger"
+	ledger "github.com/Privasys/immutable-ledger/ledger"
 )
 
 // Backend is a ledger.Backend over a Pebble database.
