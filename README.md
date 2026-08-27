@@ -107,7 +107,8 @@ content is always re-read and verified through the ledger.
 
 Supported today: CREATE/DROP/RENAME/TRUNCATE TABLE (a primary key is
 required), INSERT/UPDATE/DELETE, SELECT with joins, aggregation,
-ORDER BY and LIMIT, secondary and unique indexes (CREATE/DROP INDEX),
+window functions, CTEs, ORDER BY and LIMIT, secondary and unique
+indexes (CREATE/DROP INDEX),
 AUTO_INCREMENT, and the type set INT/BIGINT (signed and unsigned),
 FLOAT/DOUBLE, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB,
 DATETIME/TIMESTAMP, BOOLEAN. Statements run in autocommit (each DML
