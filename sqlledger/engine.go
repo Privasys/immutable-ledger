@@ -87,9 +87,10 @@ func NewEngine(s *Store) *Engine {
 func (e *Engine) Store() *Store { return e.store }
 
 // NewContext returns a fresh session context with the store's database
-// selected. Sessions are cheap; use one per goroutine.
+// selected. The session carries transaction state (BEGIN … COMMIT);
+// use one context per goroutine.
 func (e *Engine) NewContext(ctx context.Context) *sql.Context {
-	sctx := sql.NewContext(ctx, sql.WithSession(sql.NewBaseSession()))
+	sctx := sql.NewContext(ctx, sql.WithSession(NewSession(e.store)))
 	sctx.SetCurrentDatabase(e.store.dbName)
 	return sctx
 }

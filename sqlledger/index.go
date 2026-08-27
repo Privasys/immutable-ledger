@@ -362,10 +362,12 @@ func boundedColumn(prefix []byte, marker byte, kind colKind, lo, hi sql.MySQLRan
 // -- table integration -----------------------------------------------------
 
 // indexRangePartition scans [start, end) of one keyspace, optionally
-// in reverse key order.
+// in reverse key order. idxID identifies the secondary index space
+// (unused for the primary keyspace).
 type indexRangePartition struct {
 	start, end []byte
 	secondary  bool
+	idxID      uint64
 	reverse    bool
 	seq        int
 }
@@ -414,13 +416,17 @@ func (t *indexedLedgerTable) LookupPartitions(_ *sql.Context, lookup sql.IndexLo
 		if !ok {
 			return nil, fmt.Errorf("index %s cannot serve the requested range", idx.ID())
 		}
-		parts = append(parts, indexRangePartition{
+		part := indexRangePartition{
 			start:     start,
 			end:       end,
 			secondary: idx.idx != nil,
 			reverse:   lookup.IsReverse,
 			seq:       i,
-		})
+		}
+		if idx.idx != nil {
+			part.idxID = idx.idx.ID
+		}
+		parts = append(parts, part)
 	}
 	if lookup.IsReverse {
 		// Partitions themselves stream in reverse range order.

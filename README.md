@@ -108,13 +108,33 @@ content is always re-read and verified through the ledger.
 Supported today: CREATE/DROP/RENAME/TRUNCATE TABLE (a primary key is
 required), INSERT/UPDATE/DELETE, SELECT with joins, aggregation,
 window functions, CTEs, ORDER BY and LIMIT, secondary and unique
-indexes (CREATE/DROP INDEX),
-AUTO_INCREMENT, and the type set INT/BIGINT (signed and unsigned),
-FLOAT/DOUBLE, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB,
-DATETIME/TIMESTAMP, BOOLEAN. Statements run in autocommit (each DML
-statement is one atomic ledger commit); multi-statement transactions,
-foreign keys, DECIMAL/JSON/ENUM columns, non-binary collations and
-column defaults are not yet supported.
+indexes (CREATE/DROP INDEX), AUTO_INCREMENT, multi-statement
+transactions (below), and the type set INT/BIGINT (signed and
+unsigned), FLOAT/DOUBLE, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB,
+DATETIME/TIMESTAMP, BOOLEAN. Foreign keys, DECIMAL/JSON/ENUM columns,
+non-binary collations and column defaults are not yet supported.
+
+### Transactions
+
+Without an explicit transaction, statements run in autocommit: each
+DML statement is one atomic ledger commit. `BEGIN … COMMIT` (with
+`ROLLBACK`, savepoints and `SET autocommit = 0`) buffers a
+multi-statement transaction in the session: later statements read
+their transaction's earlier writes through every path (point lookups,
+scans, indexes), other sessions see nothing until commit, and `COMMIT`
+applies the whole write-set as **one atomic ledger commit** — a
+transaction is exactly one ledger version, the root history only ever
+contains committed states, and a crash mid-transaction needs no
+recovery because nothing reached storage. DDL commits directly and
+implicitly commits the surrounding transaction (as in MySQL).
+
+Concurrency is optimistic: the transaction records the committed row
+each write was based on, and commit re-validates the write-set (rows
+and unique indexes) if other work committed in between. A transaction
+whose touched rows changed underneath it fails with `ErrTxnConflict`
+and is rolled back — retry it. Keys a transaction only read are not
+tracked, so write skew across transactions is possible; serialise such
+transactions in the application if it matters.
 
 ## Freshness model and limits
 

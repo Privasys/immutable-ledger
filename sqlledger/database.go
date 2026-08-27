@@ -56,7 +56,17 @@ func (d *Database) CreateTable(_ *sql.Context, name string, schema sql.PrimaryKe
 	return d.s.createTable(name, schema, comment)
 }
 
-func (d *Database) DropTable(_ *sql.Context, name string) error {
+func (d *Database) DropTable(ctx *sql.Context, name string) error {
+	// DDL commits directly; the session's buffered rows for this table
+	// (if any) are discarded with it.
+	if txn := txnOf(ctx); txn != nil {
+		d.s.mu.RLock()
+		def, ok := d.s.tables[strings.ToLower(name)]
+		d.s.mu.RUnlock()
+		if ok {
+			delete(txn.tables, def.ID)
+		}
+	}
 	return d.s.dropTable(name)
 }
 

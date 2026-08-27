@@ -29,9 +29,12 @@
 //
 // # Concurrency and transactions
 //
-// The store serialises writers and runs statements in autocommit: each
-// DML statement is one atomic ledger commit. Multi-statement
-// transactions (BEGIN … COMMIT) are not yet supported.
+// The store serialises writers. Without an explicit transaction,
+// statements run in autocommit: each DML statement is one atomic
+// ledger commit. BEGIN … COMMIT buffers a multi-statement transaction
+// in the session and applies it as one atomic ledger commit (one
+// ledger version per transaction); see txn.go for the model, its
+// optimistic conflict handling (ErrTxnConflict), and savepoints.
 package sqlledger
 
 import (
