@@ -152,7 +152,20 @@ func (s *Store) RestoreLeaves(leaves []Leaf) (Hash, uint64, error) {
 	if newRootChild != nil {
 		newRoot = newRootChild.hash
 	}
-	return s.commitAcc(acc, newRootChild, newRoot)
+	root, version, err := s.commitAcc(acc, newRootChild, newRoot)
+	if err != nil {
+		return Hash{}, 0, err
+	}
+	// The head leaf (if the source was chained) arrived as data;
+	// refresh the cache from the restored state.
+	if s.history {
+		if val, ok, err := s.Get(HistoryKey); err != nil {
+			return Hash{}, 0, err
+		} else if ok && len(val) == HashSize {
+			copy(s.historyHead[:], val)
+		}
+	}
+	return root, version, nil
 }
 
 // StampVersion is the snapshot-restore epilogue: stamp the store at

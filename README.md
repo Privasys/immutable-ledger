@@ -136,6 +136,30 @@ and is rolled back — retry it. Keys a transaction only read are not
 tracked, so write skew across transactions is possible; serialise such
 transactions in the application if it matters.
 
+## Auditable history
+
+`WithHistoryChain()` (a `Create`-time choice) makes every commit
+extend a hash chain over the root lineage, stored in a reserved leaf —
+so the **current root commits to every root before it**. Storage
+cannot rewrite or fork history between two audits and stay consistent
+with the live root. On top of it, `ChangesAt` extracts what any
+version changed (a structural diff, cost proportional to the change),
+and `VerifyHistory` confirms the recorded root sequence from any
+anchored `(version, head)` pair up to the live state.
+
+The intended workflow is **audit, sign, prune**: at each audit (an
+owner-side or delegated audit — content verification requires the
+commitment key), verify the chain from the previous signed anchor,
+review the transitions as needed, sign the new
+`(root, version, head)`, then `Prune` the audited range. Pruning
+physically removes superseded and deleted values, chain segment
+included — the signed anchor stands in for the discarded history, and
+the audit cadence bounds how long deleted data can persist. Third
+parties without the key can still verify root lineage and fork
+evidence, but not contents. See
+[docs/auditing.md](docs/auditing.md) for the full model and the exact
+link function.
+
 ## Freshness model and limits
 
 Live reads are bound to the in-memory root: storage cannot roll back or

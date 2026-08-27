@@ -72,6 +72,13 @@ var (
 	ckptMACLabel  = []byte("immutable-ledger:ckpt-mac:v1")
 )
 
+// reservedKeyPrefix namespaces system keys. User batches may not write
+// under it (PutBatch refuses); reads are unrestricted.
+var reservedKeyPrefix = []byte("\x00immutable-ledger:")
+
+// checkpoint flags (persisted, authenticated).
+const ckptFlagHistory = 0x01
+
 func nodeRecordKey(nk *nodeKey) []byte {
 	return append([]byte{recNode}, nk.encode()...)
 }
@@ -158,13 +165,24 @@ type Store struct {
 	cache     *nodeCache
 	// snapshotPin caps pruning while a snapshot streams from a version.
 	snapshotPin *uint64
+	// history: every commit extends a hash chain over the root lineage,
+	// committed into the state itself (see audit.go). Set at Create,
+	// persisted as an authenticated checkpoint flag.
+	history bool
+	// wantHistory records the caller's WithHistoryChain option (Create
+	// enables it; Open* asserts it against the stored mode).
+	wantHistory bool
+	// historyHead caches the current chain head (zeros before the first
+	// chained commit); maintained through verified reads and commits.
+	historyHead Hash
 }
 
 // Option configures a store at construction.
 type Option func(*storeOptions)
 
 type storeOptions struct {
-	sk *[KeySize]byte
+	sk      *[KeySize]byte
+	history bool
 }
 
 // WithStorageKey enables at-rest encryption of value records and the
@@ -180,6 +198,17 @@ func WithStorageKey(sk [KeySize]byte) Option {
 	return func(o *storeOptions) { o.sk = &sk }
 }
 
+// WithHistoryChain makes every commit extend a hash chain over the
+// root lineage, stored in a reserved leaf so each root commits to the
+// entire sequence of roots before it (see audit.go for the audit
+// workflow). Choose at Create — the setting is persisted and the
+// chain changes what roots a given history produces, so it cannot be
+// toggled later. Passing it to Open/OpenLatest asserts the store was
+// created with the chain (open fails otherwise).
+func WithHistoryChain() Option {
+	return func(o *storeOptions) { o.history = true }
+}
+
 // update is one deduplicated change: vh non-nil = insert/overwrite,
 // nil = delete.
 type update struct {
@@ -190,6 +219,17 @@ type update struct {
 type pendingNode struct {
 	nk nodeKey
 	n  *node
+}
+
+// staleNode retires a node this commit replaces: a persisted record is
+// marked stale; a record pending in this very commit is simply dropped
+// (unless a revision at the same key re-adds it).
+func (acc *commitAcc) staleNode(nk *nodeKey) {
+	if nk.version == acc.newVersion {
+		delete(acc.pending, string(nk.encode()))
+		return
+	}
+	acc.stale = append(acc.stale, nodeRecordKey(nk))
 }
 
 // commitAcc is the work accumulated while applying a batch, flushed
@@ -208,6 +248,9 @@ type commitAcc struct {
 	// values holds the value records to write this commit: vh →
 	// stored form (all at newVersion).
 	values map[Hash][]byte
+	// newHead is the history-chain head this commit writes (nil when
+	// the chain is off); commitAcc caches it on success.
+	newHead *Hash
 }
 
 // Create builds a fresh, empty store (version 0, placeholder root).
@@ -216,6 +259,7 @@ func Create(backend Backend, commitmentKey [KeySize]byte, opts ...Option) (*Stor
 	if err != nil {
 		return nil, err
 	}
+	s.history = s.wantHistory
 	ckpt, err := s.sealCheckpoint(&placeholderHash, 0)
 	if err != nil {
 		return nil, err
@@ -242,7 +286,54 @@ func Open(backend Backend, commitmentKey [KeySize]byte, root Hash, version uint6
 	if err != nil {
 		return nil, err
 	}
+	// Chain mode: from the checkpoint flag when a checkpoint
+	// authenticates, else from the head leaf itself — which the
+	// anchored root authenticates, so a stripped checkpoint cannot
+	// silently disable the chain.
+	flagKnown := false
+	var flags byte
+	if record, ok, err := backend.Get(checkpointRecordKey()); err == nil && ok {
+		if _, _, f, cerr := s.openCheckpoint(record); cerr == nil {
+			flagKnown, flags = true, f
+		}
+	}
+	if err := s.initHistory(flagKnown, flags&ckptFlagHistory != 0); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// initHistory resolves the chain mode at open, cross-checks it against
+// the presence of the reserved head leaf (authenticated by the root),
+// asserts the caller's WithHistoryChain expectation, and caches the
+// head. Call after root/version/rootChild are set.
+func (s *Store) initHistory(flagKnown, flag bool) error {
+	val, ok, err := s.Get(HistoryKey)
+	if err != nil {
+		return err
+	}
+	on := flag
+	if !flagKnown {
+		on = ok
+	}
+	if on {
+		if s.version > 0 && !ok {
+			return errCorrupted("history chain enabled but the head leaf is missing")
+		}
+		if ok {
+			if len(val) != HashSize {
+				return errCorrupted("history head leaf malformed")
+			}
+			copy(s.historyHead[:], val)
+		}
+	} else if ok {
+		return errCorrupted("history head leaf present but the chain flag is off")
+	}
+	if s.wantHistory && !on {
+		return errInvalid("store was not created with the history chain (WithHistoryChain is a Create-time choice)")
+	}
+	s.history = on
+	return nil
 }
 
 // OpenLatest opens at the checkpoint record the store itself maintains,
@@ -264,13 +355,16 @@ func OpenLatest(backend Backend, commitmentKey [KeySize]byte, opts ...Option) (*
 	if !ok {
 		return nil, errMissing("checkpoint record")
 	}
-	root, version, err := s.openCheckpoint(record)
+	root, version, flags, err := s.openCheckpoint(record)
 	if err != nil {
 		return nil, err
 	}
 	s.root, s.version = root, version
 	s.rootChild, err = s.loadRootChild(root, version)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.initHistory(true, flags&ckptFlagHistory != 0); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -295,11 +389,12 @@ func newStore(backend Backend, commitmentKey [KeySize]byte, opts []Option) (*Sto
 		opt(&o)
 	}
 	s := &Store{
-		backend: backend,
-		ck:      append([]byte(nil), commitmentKey[:]...),
-		root:    placeholderHash,
-		version: 0,
-		cache:   newNodeCache(defaultCacheCapacity),
+		backend:     backend,
+		ck:          append([]byte(nil), commitmentKey[:]...),
+		root:        placeholderHash,
+		version:     0,
+		cache:       newNodeCache(defaultCacheCapacity),
+		wantHistory: o.history,
 	}
 	if o.sk != nil {
 		cipher, err := newAEAD(*o.sk)
@@ -342,10 +437,18 @@ func (s *Store) openValue(path *Hash, record []byte) ([]byte, error) {
 
 // -- checkpoint (mode-dependent authentication) ---------------------------
 
+// Checkpoint payload: root(32) ‖ version u64 BE ‖ flags u8. The flags
+// byte was added later; checkpoints written without it authenticate
+// with implicit flags 0.
 func (s *Store) sealCheckpoint(root *Hash, version uint64) ([]byte, error) {
-	payload := make([]byte, 0, HashSize+8)
+	var flags byte
+	if s.history {
+		flags |= ckptFlagHistory
+	}
+	payload := make([]byte, 0, HashSize+9)
 	payload = append(payload, root[:]...)
 	payload = binary.BigEndian.AppendUint64(payload, version)
+	payload = append(payload, flags)
 	if s.cipher != nil {
 		return s.cipher.encrypt(payload, checkpointAAD)
 	}
@@ -354,31 +457,35 @@ func (s *Store) sealCheckpoint(root *Hash, version uint64) ([]byte, error) {
 	return mac.Sum(payload), nil
 }
 
-func (s *Store) openCheckpoint(record []byte) (Hash, uint64, error) {
+func (s *Store) openCheckpoint(record []byte) (root Hash, version uint64, flags byte, err error) {
 	var payload []byte
 	if s.cipher != nil {
-		pt, err := s.cipher.decrypt(record, checkpointAAD)
-		if err != nil {
-			return Hash{}, 0, errCorruptedf("checkpoint decrypt: %v", err)
+		pt, cerr := s.cipher.decrypt(record, checkpointAAD)
+		if cerr != nil {
+			return Hash{}, 0, 0, errCorruptedf("checkpoint decrypt: %v", cerr)
 		}
 		payload = pt
 	} else {
-		if len(record) != HashSize+8+sha256.Size {
-			return Hash{}, 0, errCorrupted("checkpoint bad length")
+		if len(record) != HashSize+8+sha256.Size && len(record) != HashSize+9+sha256.Size {
+			return Hash{}, 0, 0, errCorrupted("checkpoint bad length")
 		}
-		payload = record[:HashSize+8]
+		body := len(record) - sha256.Size
+		payload = record[:body]
 		mac := hmac.New(sha256.New, s.ckptMAC)
 		mac.Write(payload)
-		if !hmac.Equal(mac.Sum(nil), record[HashSize+8:]) {
-			return Hash{}, 0, errCorrupted("checkpoint authentication failed")
+		if !hmac.Equal(mac.Sum(nil), record[body:]) {
+			return Hash{}, 0, 0, errCorrupted("checkpoint authentication failed")
 		}
 	}
-	if len(payload) != HashSize+8 {
-		return Hash{}, 0, errCorrupted("checkpoint bad length")
+	switch len(payload) {
+	case HashSize + 8:
+	case HashSize + 9:
+		flags = payload[HashSize+8]
+	default:
+		return Hash{}, 0, 0, errCorrupted("checkpoint bad length")
 	}
-	var root Hash
 	copy(root[:], payload[:HashSize])
-	return root, binary.BigEndian.Uint64(payload[HashSize:]), nil
+	return root, binary.BigEndian.Uint64(payload[HashSize : HashSize+8]), flags, nil
 }
 
 // Root returns the current (root, version). Anchor this pair externally
@@ -443,6 +550,10 @@ func (s *Store) computeBatch(ops []Op) (*commitAcc, *child, Hash, error) {
 	// Deduplicate (last wins), then sort by path.
 	deduped := make(map[Hash]*[]byte, len(ops))
 	for i := range ops {
+		if bytes.HasPrefix(ops[i].Key, reservedKeyPrefix) {
+			return nil, nil, Hash{}, errInvalidf(
+				"key %q uses the reserved system prefix", ops[i].Key)
+		}
 		path := s.pathOf(ops[i].Key)
 		if ops[i].Delete {
 			deduped[path] = nil
@@ -494,11 +605,39 @@ func (s *Store) computeBatch(ops []Op) (*commitAcc, *child, Hash, error) {
 		return nil, nil, Hash{}, nil // no-op batch
 	}
 
+	if s.history {
+		// The batch is effective: extend the chain. The link commits to
+		// the pre-batch (head, root), both known before applying, so
+		// preview and commit stay identical.
+		newRootChild, err = s.appendHistoryLink(acc, newRootChild)
+		if err != nil {
+			return nil, nil, Hash{}, err
+		}
+	}
+
 	newRoot := placeholderHash
 	if newRootChild != nil {
 		newRoot = newRootChild.hash
 	}
 	return acc, newRootChild, newRoot, nil
+}
+
+// appendHistoryLink applies the chain-head update on top of the
+// batch's tree (a second applySubtree pass at the same new version;
+// same-version nodes resolve from acc.pending, and records written by
+// this commit are never marked stale).
+func (s *Store) appendHistoryLink(acc *commitAcc, rootChild *child) (*child, error) {
+	head := HistoryLink(s.historyHead, s.root, acc.newVersion)
+	path := s.pathOf(HistoryKey)
+	vh := s.vhOf(&path, head[:])
+	ct, err := s.sealValue(&path, head[:])
+	if err != nil {
+		return nil, err
+	}
+	acc.insertCTs[path] = ct
+	acc.newHead = &head
+	prefix := make([]uint8, 0, nibbles)
+	return s.applySubtree(acc, rootChild, &prefix, []update{{path: path, vh: &vh}})
 }
 
 // PreviewBatch computes the (root, version) this batch WOULD produce,
@@ -570,6 +709,9 @@ func (s *Store) commitAcc(acc *commitAcc, newRootChild *child, newRoot Hash) (Ha
 	s.root = newRoot
 	s.version = newVersion
 	s.rootChild = newRootChild
+	if acc.newHead != nil {
+		s.historyHead = *acc.newHead
+	}
 	return s.root, s.version, nil
 }
 
@@ -838,9 +980,21 @@ func (s *Store) applySubtree(acc *commitAcc, old *child, prefix *[]uint8, update
 	}
 
 	nk := nodeKey{version: old.version, prefix: append([]uint8(nil), *prefix...)}
-	n, err := s.loadNode(&nk, &old.hash)
-	if err != nil {
-		return nil, err
+	var n *node
+	if old.version == acc.newVersion {
+		// A node this very commit built (history-chain second pass):
+		// resolve from the pending set, not storage.
+		pn, ok := acc.pending[string(nk.encode())]
+		if !ok {
+			return nil, errCorruptedf("pending node %v missing", &nk)
+		}
+		n = pn.n
+	} else {
+		loaded, err := s.loadNode(&nk, &old.hash)
+		if err != nil {
+			return nil, err
+		}
+		n = loaded
 	}
 	if n.isLeaf() != old.isLeaf {
 		return nil, errCorruptedf("node %v kind mismatch", &nk)
@@ -872,10 +1026,17 @@ func (s *Store) applySubtree(acc *commitAcc, old *child, prefix *[]uint8, update
 				return old, nil // nothing changed
 			}
 		}
-		// The resident leaf node is superseded in every changed case.
-		acc.stale = append(acc.stale, nodeRecordKey(&nk))
+		// The resident leaf node is superseded in every changed case. A
+		// record written by this same commit is dropped from the
+		// pending set instead of being marked stale (a stale mark on a
+		// live record would let pruning delete it).
+		acc.staleNode(&nk)
 		if e, ok := merged[leaf.path]; !ok || e.vh != leaf.vh {
-			acc.stale = append(acc.stale, valueRecordKey(&leaf.vh, leaf.valueVersion))
+			if leaf.valueVersion == acc.newVersion {
+				delete(acc.values, leaf.vh)
+			} else {
+				acc.stale = append(acc.stale, valueRecordKey(&leaf.vh, leaf.valueVersion))
+			}
 		}
 		pairs := make([]leafNode, 0, len(merged))
 		for p, e := range merged {
@@ -914,7 +1075,7 @@ func (s *Store) applySubtree(acc *commitAcc, old *child, prefix *[]uint8, update
 	if !changed {
 		return old, nil
 	}
-	acc.stale = append(acc.stale, nodeRecordKey(&nk))
+	acc.staleNode(&nk)
 
 	var only *child
 	present := 0

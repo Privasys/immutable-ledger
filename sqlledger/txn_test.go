@@ -389,3 +389,41 @@ func TestTxnCrossTableAtomic(t *testing.T) {
 		t.Fatalf("table b: %s", got)
 	}
 }
+
+// A chained ledger under the SQL layer: transactions extend the chain
+// one link per commit, the lineage verifies, and identical SQL
+// histories still produce identical roots and heads.
+func TestTxnWithHistoryChain(t *testing.T) {
+	run := func() (*harness, ledger.Hash, ledger.Hash) {
+		backend := ledger.NewMemBackend()
+		led, err := ledger.Create(backend, testCK, ledger.WithHistoryChain())
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := attach(t, backend, led)
+		h.exec(t, `CREATE TABLE t (id BIGINT PRIMARY KEY, v BIGINT)`)
+		h.exec(t, `INSERT INTO t VALUES (1, 10), (2, 20)`)
+		h.exec(t, `BEGIN`)
+		h.exec(t, `UPDATE t SET v = v + 1 WHERE id = 1`)
+		h.exec(t, `DELETE FROM t WHERE id = 2`)
+		h.exec(t, `COMMIT`)
+		root, _ := led.Root()
+		head, _, err := led.HistoryHead()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h, root, head
+	}
+	h1, r1, hd1 := run()
+	_, r2, hd2 := run()
+	if r1 != r2 || hd1 != hd2 {
+		t.Fatal("identical SQL histories diverged under the chain")
+	}
+	if err := h1.led.VerifyHistory(0, ledger.Hash{}); err != nil {
+		t.Fatalf("verify SQL-driven chain: %v", err)
+	}
+	// The whole transaction is one chain link.
+	if _, v := h1.led.Root(); v != 3 {
+		t.Fatalf("expected 3 versions (create, insert, txn), got %d", v)
+	}
+}
