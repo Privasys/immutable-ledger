@@ -184,6 +184,26 @@ single-statement commits are fsync-bound, reads and proofs sit in the
 100–300 µs band through the whole stack, and scans pay ~150 µs per row
 for verified re-reads.
 
+## Dependencies
+
+The core `ledger` package depends only on the Go standard library. The
+optional layers build on two projects, both permissively licensed and
+actively maintained:
+
+- [Pebble](https://github.com/cockroachdb/pebble) (BSD-3-Clause) — the
+  storage engine behind [`backend/pebble`](backend/pebble).
+- [go-mysql-server](https://github.com/dolthub/go-mysql-server)
+  (Apache-2.0), with its
+  [vitess](https://github.com/dolthub/vitess) SQL front end
+  (Apache-2.0) — the query engine behind [`sqlledger`](sqlledger).
+
+The complete module tree linked into builds, together with every
+licence and notice text, is reproduced in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). This repository
+contains only our own source; if you distribute a compiled artefact,
+ship that file alongside it to satisfy the upstream retention
+requirements.
+
 ## Licence
 
 AGPL-3.0 — see [LICENSE](LICENSE).
