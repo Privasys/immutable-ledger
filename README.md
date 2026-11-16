@@ -197,6 +197,13 @@ actively maintained:
   [vitess](https://github.com/dolthub/vitess) SQL front end
   (Apache-2.0) — the query engine behind [`sqlledger`](sqlledger).
 
+Building `sqlledger` needs Go 1.27.3 or later, and a choice for the
+query engine's regular expressions: either cgo with the ICU library, or
+the `gms_pure_go` build tag for a pure-Go build with no C library
+(`GOFLAGS=-tags=gms_pure_go`, which this repository's CI uses). Without
+one of them the build stops with "build constraints exclude all Go files
+in …/internal/regex". The core `ledger` package needs neither.
+
 The complete module tree linked into builds, together with every
 licence and notice text, is reproduced in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). This repository
