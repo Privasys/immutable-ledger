@@ -40,11 +40,11 @@ func (t *ledgerTable) IsTemporary() bool { return false }
 
 func (t *ledgerTable) Collation() sql.CollationID { return sql.Collation_Default }
 
-func (t *ledgerTable) Schema() sql.Schema {
-	return t.PrimaryKeySchema().Schema
+func (t *ledgerTable) Schema(ctx *sql.Context) sql.Schema {
+	return t.PrimaryKeySchema(ctx).Schema
 }
 
-func (t *ledgerTable) PrimaryKeySchema() sql.PrimaryKeySchema {
+func (t *ledgerTable) PrimaryKeySchema(*sql.Context) sql.PrimaryKeySchema {
 	schema := make(sql.Schema, len(t.def.Columns))
 	pk := make(map[int]bool, len(t.def.PKOrds))
 	for _, ord := range t.def.PKOrds {

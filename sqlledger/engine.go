@@ -90,7 +90,7 @@ func (e *Engine) Store() *Store { return e.store }
 // selected. The session carries transaction state (BEGIN … COMMIT);
 // use one context per goroutine.
 func (e *Engine) NewContext(ctx context.Context) *sql.Context {
-	sctx := sql.NewContext(ctx, sql.WithSession(NewSession(e.store)))
+	sctx := e.Engine.NewContext(ctx, sql.WithSession(NewSession(e.store, e.Engine.Variables())))
 	sctx.SetCurrentDatabase(e.store.dbName)
 	return sctx
 }

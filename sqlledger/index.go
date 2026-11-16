@@ -183,7 +183,19 @@ func (x *ledgerIndex) PrefixLengths() []uint16 { return nil }
 
 func (x *ledgerIndex) CanSupportOrderBy(sql.Expression) bool { return false }
 
-func (x *ledgerIndex) ColumnExpressionTypes() []sql.ColumnExpressionType {
+// CoversColumns is false: an index entry carries the key, and the row it
+// names is always read, and verified, through the ledger.
+func (x *ledgerIndex) CoversColumns([]string) bool { return false }
+
+// Order and Reversible say entries come back in index order, either way:
+// the keyspace is order-preserving and reverse lookups are served. The
+// engine then reads a page in order and stops, instead of sorting.
+func (x *ledgerIndex) Order(*sql.Context) sql.IndexOrder { return sql.IndexOrderAsc }
+func (x *ledgerIndex) Reversible(*sql.Context) bool      { return true }
+
+var _ sql.OrderedIndex = (*ledgerIndex)(nil)
+
+func (x *ledgerIndex) ColumnExpressionTypes(*sql.Context) []sql.ColumnExpressionType {
 	ords := x.ords()
 	out := make([]sql.ColumnExpressionType, len(ords))
 	for i, ord := range ords {

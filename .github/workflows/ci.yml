@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# The SQL engine's regular expressions in pure Go: no C library in the build.
+env:
+  GOFLAGS: -tags=gms_pure_go
+
 jobs:
   test:
     runs-on: ubuntu-latest

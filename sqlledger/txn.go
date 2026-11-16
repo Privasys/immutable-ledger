@@ -54,9 +54,10 @@ type Session struct {
 var _ sql.Session = (*Session)(nil)
 var _ sql.TransactionSession = (*Session)(nil)
 
-// NewSession builds a session over the store.
-func NewSession(s *Store) *Session {
-	return &Session{BaseSession: sql.NewBaseSession(), store: s}
+// NewSession builds a session over the store, holding the variables of
+// the engine it will run on: the engine refuses a session made for another.
+func NewSession(s *Store, vars *sql.EngineVariables) *Session {
+	return &Session{BaseSession: sql.NewBaseSessionWithVariables(vars), store: s}
 }
 
 // ledgerTransaction is the engine-facing transaction handle. State
