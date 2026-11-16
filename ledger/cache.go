@@ -3,7 +3,10 @@
 
 package ledger
 
-import "sync"
+import (
+	"container/list"
+	"sync"
+)
 
 // nodeCache is an LRU over node records.
 //
@@ -14,38 +17,36 @@ import "sync"
 // the parent's expectation on every use: the cache removes backend I/O,
 // never trust checks.
 //
-// Eviction is least-recently-used via a monotonic access tick with an
-// O(capacity) scan on eviction — capacities are ~10³ and evictions are
-// per cache-miss, so the scan is noise next to a storage round trip.
+// Eviction is least-recently-used in O(1): a list in recency order with
+// a map into it. A read that walks the tree touches one node per level,
+// so the cache has to hold the upper levels of a large tree whole to be
+// worth having, and a miss must not cost a scan of the cache.
 type nodeCache struct {
 	mu       sync.Mutex
 	capacity int
-	tick     uint64
-	m        map[string]cacheEntry // keyed by encoded nodeKey
+	order    *list.List               // front: most recently used
+	m        map[string]*list.Element // keyed by encoded nodeKey
 }
 
 type cacheEntry struct {
-	node     *node
-	lastUsed uint64
+	key  string
+	node *node
 }
 
 // newNodeCache builds a cache; capacity 0 disables caching entirely.
 func newNodeCache(capacity int) *nodeCache {
-	return &nodeCache{capacity: capacity, m: make(map[string]cacheEntry)}
+	return &nodeCache{capacity: capacity, order: list.New(), m: make(map[string]*list.Element)}
 }
 
 func (c *nodeCache) get(nk *nodeKey) *node {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tick++
-	k := string(nk.encode())
-	e, ok := c.m[k]
+	e, ok := c.m[string(nk.encode())]
 	if !ok {
 		return nil
 	}
-	e.lastUsed = c.tick
-	c.m[k] = e
-	return e.node
+	c.order.MoveToFront(e)
+	return e.Value.(*cacheEntry).node
 }
 
 func (c *nodeCache) put(nk *nodeKey, n *node) {
@@ -55,33 +56,33 @@ func (c *nodeCache) put(nk *nodeKey, n *node) {
 		return
 	}
 	k := string(nk.encode())
-	if _, exists := c.m[k]; !exists && len(c.m) >= c.capacity {
-		var oldestKey string
-		var oldestTick uint64
-		first := true
-		for key, e := range c.m {
-			if first || e.lastUsed < oldestTick {
-				oldestKey, oldestTick, first = key, e.lastUsed, false
-			}
-		}
-		delete(c.m, oldestKey)
+	if e, ok := c.m[k]; ok {
+		e.Value.(*cacheEntry).node = n
+		c.order.MoveToFront(e)
+		return
 	}
-	c.tick++
-	c.m[k] = cacheEntry{node: n, lastUsed: c.tick}
+	for len(c.m) >= c.capacity {
+		oldest := c.order.Back()
+		c.order.Remove(oldest)
+		delete(c.m, oldest.Value.(*cacheEntry).key)
+	}
+	c.m[k] = c.order.PushFront(&cacheEntry{key: k, node: n})
 }
 
 // clear drops everything (pruning; capacity changes).
 func (c *nodeCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.m = make(map[string]cacheEntry)
+	c.order.Init()
+	c.m = make(map[string]*list.Element)
 }
 
 func (c *nodeCache) setCapacity(capacity int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.capacity = capacity
-	c.m = make(map[string]cacheEntry)
+	c.order.Init()
+	c.m = make(map[string]*list.Element)
 }
 
 func (c *nodeCache) len() int {

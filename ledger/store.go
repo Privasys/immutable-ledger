@@ -135,9 +135,12 @@ type PruneStats struct {
 	RootRecordsDeleted int
 }
 
-// defaultCacheCapacity keeps ~10³ immutable node records (≈ a few
-// hundred KiB) so the top tree levels stay permanently warm.
-const defaultCacheCapacity = 1024
+// defaultCacheCapacity keeps the top four levels of the tree warm whole
+// (1 + 16 + 256 + 4096 nodes) with room for the hot part of the fifth:
+// a read then reaches the backend for the last levels only. An internal
+// node is about a kilobyte, so this is some 16 MiB; SetCacheCapacity
+// takes more where the store is large and memory allows.
+const defaultCacheCapacity = 16384
 
 // pruneChunk is the record count per prune scan/delete round trip.
 const pruneChunk = 512
