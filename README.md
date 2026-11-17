@@ -178,11 +178,11 @@ strongest for roots the caller anchored.
 ## Performance
 
 Measured figures and how to reproduce them:
-[docs/benchmarks.md](docs/benchmarks.md). In short: batched writes are
-CPU-bound on commitment hashing at roughly 5–7k rows/s per core,
-single-statement commits are fsync-bound, reads and proofs sit in the
-100–300 µs band through the whole stack, and scans pay ~150 µs per row
-for verified re-reads.
+[docs/benchmarks.md](docs/benchmarks.md). In short, at v1.0.0:
+batched writes are CPU-bound on commitment hashing at roughly 11,000
+to 14,000 rows/s per core, single-statement commits are fsync-bound,
+reads and proofs sit in the 40 to 220 µs band through the whole stack,
+and scans pay about 94 µs per row for verified re-reads.
 
 ## Dependencies
 
